@@ -50,7 +50,12 @@ async function show(criteria) {
   `rpt_export_pdf`, `rpt_export_html`, `rpt_export_csv`, `rpt_export_png`, `rpt_print`, `rpt_find`,
   `rpt_find_placeholder`, `rpt_hit_of` (`{a} of {b}`), `rpt_no_matches`, `rpt_prev_match`, `rpt_next_match`,
   `rpt_close`, `rpt_refresh`, `rpt_record`, `rpt_records`, `rpt_no_data`, `rpt_loading`, `rpt_waiting`,
-  `rpt_data_source`.
+  `rpt_data_source`, `rpt_layout_scroll`, `rpt_layout_page`, and the right-click menu: `rpt_copy_image`,
+  `rpt_page_n` (`page {n}`), `rpt_copy`, `rpt_copy_value`, `rpt_copy_row`, `rpt_copy_page` (`Copy page {n}`),
+  `rpt_copy_all`, `rpt_copied`, `rpt_copying`, `rpt_copied_image`, `rpt_image_saved`.
+- **Right-click** on a page: **Copy as image** (the page as a picture — paste it into a chat, Word or an email with
+  Ctrl+V), copy a value, a row, a page or all pages as text. `viewer.js` gives the iframe `allow="clipboard-write"`;
+  if you write the `<iframe>` yourself, add it too (without it the picture is downloaded instead).
 - Only the page that opened the viewer can talk to it (`viewer.js` passes its address).
 
 ### Example API controller (ASP.NET Core + Dapper)
