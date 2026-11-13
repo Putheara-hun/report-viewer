@@ -38,7 +38,7 @@ async function show(criteria) {
 | `viewer.setData(name, rows)` | new rows for one data source, re-rendered |
 | `viewer.setParams({ TITLE: '…' })` | new parameter values, re-rendered |
 | `viewer.setTheme('dark')` · `viewer.setLabels({...})` | colours · words |
-| `viewer.refresh()` · `viewer.print()` · `viewer.exportAs('pdf')` | re-render · print · download (`pdf`, `xlsx`, `csv`, `html`, `png`) |
+| `viewer.refresh()` · `viewer.print()` · `viewer.exportAs('pdf')` | re-render · print · download (`pdf`, `xlsx`, `docx`, `csv`, `html`, `png`) |
 | `ReportViewer.open({ report, data, params })` | the viewer in a new browser tab (call it from a click) |
 
 - **Rows:** `data` is keyed by the data source **name** in the design (name it e.g. `DataSet1` in the designer).
@@ -46,7 +46,7 @@ async function show(criteria) {
   a database needs its rows sent — the viewer says which one.
 - **Parameters:** `params` fill `{?NAME}` in the design, also names the design does not declare (TITLE, LOGO …).
 - **Words** (`labels`) use the keys of the application's viewer: `rpt_first_page`, `rpt_prev_page`, `rpt_next_page`,
-  `rpt_last_page`, `rpt_page_number`, `rpt_of`, `rpt_zoom_pct`, `rpt_zoom`, `rpt_export`, `rpt_export_excel`,
+  `rpt_last_page`, `rpt_page_number`, `rpt_of`, `rpt_zoom_pct`, `rpt_zoom`, `rpt_export`, `rpt_export_excel`, `rpt_export_word`,
   `rpt_export_pdf`, `rpt_export_html`, `rpt_export_csv`, `rpt_export_png`, `rpt_print`, `rpt_find`,
   `rpt_find_placeholder`, `rpt_hit_of` (`{a} of {b}`), `rpt_no_matches`, `rpt_prev_match`, `rpt_next_match`,
   `rpt_close`, `rpt_refresh`, `rpt_record`, `rpt_records`, `rpt_no_data`, `rpt_loading`, `rpt_waiting`,
@@ -56,6 +56,9 @@ async function show(criteria) {
 - **Right-click** on a page: **Copy as image** (the page as a picture — paste it into a chat, Word or an email with
   Ctrl+V), copy a value, a row, a page or all pages as text. `viewer.js` gives the iframe `allow="clipboard-write"`;
   if you write the `<iframe>` yourself, add it too (without it the picture is downloaded instead).
+- **Excel / Word** exports look like the preview: fonts (Khmer too), colours, fills, borders, alignment, column widths
+  and row heights. In Excel, numbers and dates stay numbers and dates with the report's format, and the pages follow
+  one another (the page header once, no page footers). Word keeps one Word page per report page with its pictures.
 - Only the page that opened the viewer can talk to it (`viewer.js` passes its address).
 
 ### Example API controller (ASP.NET Core + Dapper)
