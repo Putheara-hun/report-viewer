@@ -1,0 +1,5 @@
+node_modules
+dist
+*.log
+# temporary files from editors / interrupted saves
+*.tmp.*

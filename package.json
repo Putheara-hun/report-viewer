@@ -1,0 +1,27 @@
+{
+  "name": "report-viewer",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Report Viewer - shows ReportTool reports from their text (XML/RDL, HTML or JSON): pages, zoom, find, parameters, print, export.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "sync": "node scripts/sync.mjs"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "jspdf": "^4.2.1",
+    "lucide-vue-next": "^0.460.0",
+    "qrcode-generator": "^1.4.4",
+    "vue": "^3.5.45"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.10",
+    "typescript": "^5.7.3",
+    "vite": "^6.4.6",
+    "vue-tsc": "^3.3.14"
+  }
+}
