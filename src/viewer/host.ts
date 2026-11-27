@@ -2,17 +2,20 @@
 // The viewer runs in an iframe of the host page, or in a tab the host opened (window.open); see public/viewer.js.
 //
 //   host -> viewer                                              viewer -> host
-//   reportviewer:init      { labels?, theme? }                  reportviewer:ready     { version }
+//   reportviewer:init      { labels?, theme?, layout?, files? } reportviewer:ready     { version }
 //   reportviewer:load      { content, format?, name?,           reportviewer:loaded    { name, warnings }
 //                            data?: rows[] | { <source>: rows[] }, reportviewer:rendered  { pages }
 //                            params?: { <name>: value } }       reportviewer:refresh   (the user clicked Refresh)
 //   reportviewer:setData   { name, rows }                       reportviewer:error     { message }
 //   reportviewer:setParams { values, refresh? }                 reportviewer:ok        (answer)
-//   reportviewer:refresh   { reloadData? }
+//   reportviewer:refresh   { reloadData? }                      reportviewer:file      { name, mime, action, size, base64 }
 //   reportviewer:print     {}
-//   reportviewer:export    { format: pdf|xlsx|csv|html|png }
+//   reportviewer:export    { format: pdf|xlsx|docx|csv|html|png }
 //   labels: the viewer's words by the host viewer's keys (rpt_print, rpt_of, …); theme: 'light' | 'dark';
-//   layout: 'page' (one page at a time) | 'scroll' (all pages one after another)
+//   layout: 'page' (one page at a time) | 'scroll' (all pages one after another);
+//   files: 'browser' (default: exports are downloaded, Print opens the browser's print) | 'host' (every export, and
+//   Print as a PDF, goes to the host as reportviewer:file - for apps whose web view cannot download or print, e.g. a
+//   Flutter / Android / iOS web view; action = 'download' | 'print')
 //
 // Every request may carry a requestId; its answer (loaded / ok / error) repeats it.
 // Only the page that opened the viewer is answered: ?origins=https://erp.example.com (comma list) or, without it,
@@ -32,7 +35,28 @@ export interface ViewerController {
   exportAs(format: ExportFormat): Promise<void>;
 }
 
-export const viewerHost = reactive({ active: false });
+export const viewerHost = reactive({ active: false, files: 'browser' as 'browser' | 'host' });
+
+/** a file for the host: 'download' (an export, the copy-as-image fallback) or 'print' (Print, as a PDF) */
+export type FileAction = 'download' | 'print';
+
+/**
+ * Hands a file to the host application when it asked for files ('host'): true = sent, false = the browser keeps
+ * doing it itself (download / print). The bytes go as base64 so any host can take them, a web view's JavaScript
+ * channel included.
+ */
+export async function deliverFile(blob: Blob, name: string, action: FileAction): Promise<boolean> {
+  if (!viewerHost.active || viewerHost.files !== 'host' || !target || !targetOrigin) return false;
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result ?? ''));
+    r.onerror = () => reject(r.error ?? new Error('The file could not be read.'));
+    r.readAsDataURL(blob);
+  });
+  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  target.postMessage({ type: 'reportviewer:file', name, mime: blob.type || 'application/octet-stream', action, size: blob.size, base64 }, targetOrigin);
+  return true;
+}
 
 let target: Window | null = null;
 let targetOrigin = '';
@@ -92,6 +116,7 @@ async function onMessage(e: MessageEvent) {
     setLabels(m.labels);
     setTheme(m.theme);
     hostLayout(m.layout);
+    if (m.files === 'host' || m.files === 'browser') viewerHost.files = m.files;
     switch (m.type.slice('reportviewer:'.length)) {
       case 'init':
         reply('ok');

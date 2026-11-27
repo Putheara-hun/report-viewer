@@ -1,0 +1,13 @@
+name: report_viewer_example
+description: How a Flutter app shows reports with the Report Viewer (Android, iOS, web).
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  report_viewer:
+    path: ../

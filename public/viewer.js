@@ -15,6 +15,10 @@
  *     onRendered: (pages) => {},                   // optional
  *     onRefresh: () => {},                         // optional: the user clicked Refresh (send fresh rows)
  *     onError: (err) => alert(err.message),        // optional
+ *     onFile: (file) => {},                        // optional: YOU take the exports and Print (a phone app's web view
+ *                                                  //   cannot download or print): file = { name, mime, size,
+ *                                                  //   action: 'download' | 'print' (Print sends a PDF), base64,
+ *                                                  //   blob(), download() }. Without it the browser downloads / prints.
  *   });
  *   viewer.load(otherText, { data, params });       // show another report
  *   viewer.load(await (await fetch('/api/report/42')).json());   // or your API's { report, data, params } as is
@@ -34,6 +38,30 @@
     url.searchParams.set('embed', '1');
     url.searchParams.set('origins', location.origin); // only this page may talk to the viewer
     return url;
+  }
+
+  /** a file the viewer made (reportviewer:file): its bytes as base64, as a Blob, or downloaded by this page */
+  function fileOf(m) {
+    var file = { name: m.name, mime: m.mime, size: m.size, action: m.action, base64: m.base64 };
+    file.blob = function () {
+      var bin = atob(m.base64 || '');
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Blob([bytes], { type: m.mime || 'application/octet-stream' });
+    };
+    file.download = function () {
+      var url = URL.createObjectURL(file.blob());
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = m.name || 'report';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () {
+        URL.revokeObjectURL(url);
+      }, 5000);
+    };
+    return file;
   }
 
   /** talk to a viewer window (iframe content or tab); returns the viewer API */
@@ -77,10 +105,14 @@
         return;
       }
       if (type === 'ready') {
-        // words and theme first, so the report never shows in the wrong language / colours
-        if (opts.labels || opts.theme || opts.layout) post('init', { labels: opts.labels, theme: opts.theme, layout: opts.layout });
+        // words and theme first, so the report never shows in the wrong language / colours; files: who takes the
+        // exports (the page with onFile, else the browser)
+        if (opts.labels || opts.theme || opts.layout || opts.onFile)
+          post('init', { labels: opts.labels, theme: opts.theme, layout: opts.layout, files: opts.onFile ? 'host' : 'browser' });
         resolveReady(m);
         if (opts.onReady) opts.onReady(m);
+      } else if (type === 'file') {
+        if (opts.onFile) opts.onFile(fileOf(m));
       } else if (type === 'rendered') {
         if (opts.onRendered) opts.onRendered(m.pages);
       } else if (type === 'refresh') {

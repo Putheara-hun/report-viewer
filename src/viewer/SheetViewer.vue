@@ -7,25 +7,52 @@ import { pageToSvg } from '../export/svg';
 import type { Row } from '../model/types';
 import { dataErrors, ensureData, isStaleVersionError, rowsFor, state } from '../store/designer';
 import { labels, prefs, setLayout } from './labels';
+import { deliverFile, viewerHost, type FileAction } from './host';
 const emit = defineEmits<{ rendered: [pages: number]; failed: [message: string]; refresh: [] }>();
 const L = labels;
 const doc = shallowRef<RenderedDoc | null>(null);
 const busy = ref(false);
 const error = ref('');
+const root = ref<HTMLElement>();
 const body = ref<HTMLElement>();
 const viewH = ref(600);
 const scrollTop = ref(0);
 const isScroll = computed(() => prefs.layout === 'scroll');
+/** a phone (or any narrow frame): a short toolbar with a "more" menu, pages fitted to the width */
+const COMPACT_BELOW = 640;
+const compact = ref(false);
 const GAP = 18;
-const PAD = 20;
+const pad = computed(() => (compact.value ? 8 : 20));
+const ZMIN = 25;
+const ZMAX = 200;
 const zoom = ref(100);
 const scale = computed(() => zoom.value / 100);
+/** the zoom follows the width of the view (Fit to width); any zoom the user picks ends it */
+const fit = ref(false);
+let userZoomed = false;
 function setZoom(v: string | number) {
-  zoom.value = Math.min(200, Math.max(50, Math.trunc(Number(v)) || 100));
+  fit.value = false;
+  userZoomed = true;
+  zoom.value = Math.min(ZMAX, Math.max(ZMIN, Math.trunc(Number(v)) || 100));
 }
+const zoomBy = (d: number) => setZoom(Math.round((zoom.value + d) / 5) * 5);
+function applyFit() {
+  const el = body.value;
+  const pages = doc.value?.pages;
+  if (!fit.value || !el || !pages?.length) return;
+  const widest = pages.reduce((w, p) => Math.max(w, p.width), 0);
+  const avail = el.clientWidth - 2 * pad.value - 2; // the sheet's border
+  if (widest > 0 && avail > 0) zoom.value = Math.min(ZMAX, Math.max(ZMIN, Math.floor((avail / widest) * 100)));
+}
+function toggleFit() {
+  fit.value = !fit.value;
+  if (fit.value) applyFit();
+  else setZoom(100);
+}
+watch([doc, pad], applyFit);
 const tops = computed(() => {
   const out: number[] = [];
-  let y = PAD;
+  let y = pad.value;
   for (const p of doc.value?.pages ?? []) {
     out.push(y);
     y += p.height * scale.value + GAP;
@@ -52,8 +79,76 @@ const goLast = () => goTo(totalPages.value);
 watch(totalPages, () => {
   if (page.value > totalPages.value) page.value = totalPages.value;
 });
-// switching the layout or the zoom keeps the page the user is on
-watch([isScroll, scale], () => goTo(page.value));
+// switching the layout or the zoom keeps the page the user is on; a pinch keeps the point between the fingers
+watch([isScroll, scale], ([s, sc], [s0, sc0]) => {
+  const el = body.value;
+  const f = pinchFocus;
+  if (el && f && s === s0 && sc0) {
+    const x = el.scrollLeft + f.x;
+    const y = el.scrollTop + f.y;
+    void nextTick(() => {
+      el.scrollLeft = Math.max(0, (x * sc) / sc0 - f.x);
+      el.scrollTop = Math.max(0, (y * sc) / sc0 - f.y);
+      updateRest();
+    });
+    return;
+  }
+  goTo(page.value);
+});
+
+// ---- touch: two fingers zoom the pages (not the whole viewer), a long press opens the copy menu
+let pinch: { d: number; z: number } | null = null;
+let pinchFocus: { x: number; y: number } | null = null;
+let pinchZoom = 0;
+let pinchRaf = 0;
+let press: { x: number; y: number; target: Element | null } | null = null;
+let pressTimer = 0;
+const fingers = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+function focusOf(t: TouchList) {
+  const r = body.value?.getBoundingClientRect();
+  return r ? { x: (t[0].clientX + t[1].clientX) / 2 - r.left, y: (t[0].clientY + t[1].clientY) / 2 - r.top } : null;
+}
+function cancelPress() {
+  clearTimeout(pressTimer);
+  press = null;
+}
+function onTouchStart(e: TouchEvent) {
+  if (e.touches.length === 2) {
+    cancelPress();
+    pinch = { d: fingers(e.touches) || 1, z: zoom.value };
+    pinchFocus = focusOf(e.touches);
+  } else if (e.touches.length === 1) {
+    const t = e.touches[0];
+    press = { x: t.clientX, y: t.clientY, target: e.target as Element | null };
+    clearTimeout(pressTimer);
+    pressTimer = window.setTimeout(() => {
+      if (press) openMenu(press.target, press.x, press.y);
+      press = null;
+    }, 550);
+  }
+}
+function onTouchMove(e: TouchEvent) {
+  if (pinch && e.touches.length === 2) {
+    e.preventDefault();
+    pinchFocus = focusOf(e.touches);
+    pinchZoom = (pinch.z * fingers(e.touches)) / pinch.d;
+    if (!pinchRaf)
+      pinchRaf = requestAnimationFrame(() => {
+        pinchRaf = 0;
+        if (pinch) setZoom(Math.round(pinchZoom / 5) * 5);
+      });
+  } else if (press) {
+    const t = e.touches[0];
+    if (!t || Math.hypot(t.clientX - press.x, t.clientY - press.y) > 10) cancelPress();
+  }
+}
+function onTouchEnd(e: TouchEvent) {
+  if (e.touches.length < 2) {
+    pinch = null;
+    pinchFocus = null;
+  }
+  cancelPress();
+}
 
 let restAtBottom = false;
 let restAtTop = true;
@@ -174,7 +269,13 @@ const sizeOf = (i: number) => {
   return { width: (p?.width ?? 0) * scale.value + 'px', height: (p?.height ?? 0) * scale.value + 'px' };
 };
 
-async function generate(reloadData = false) {
+/** the drawing under way: Print and Export wait for it (a host may ask for them right after loading the report) */
+let drawing: Promise<void> = Promise.resolve();
+function generate(reloadData = false) {
+  drawing = draw(reloadData);
+  return drawing;
+}
+async function draw(reloadData: boolean) {
   busy.value = true;
   error.value = '';
   try {
@@ -236,25 +337,30 @@ const pageText = (pi: number) => linesOf(boxesOf(pi)).map(lineText).join('\n');
 const allText = () => (doc.value?.pages ?? []).map((_, i) => pageText(i)).join('\n\n');
 
 const menu = ref<null | { x: number; y: number; page: number; value: string; row: string; sel: string }>(null);
-function onMenu(e: MouseEvent) {
-  const el = (e.target as Element | null)?.closest?.('.rv-sheet') as HTMLElement | null;
-  if (!el || !doc.value) return; // the browser's own menu outside the pages
-  e.preventDefault();
+/** the copy menu for the point (clientX, clientY) of a page; false = not on a page */
+function openMenu(target: Element | null, clientX: number, clientY: number): boolean {
+  const el = target?.closest?.('.rv-sheet') as HTMLElement | null;
+  if (!el || !doc.value) return false;
   const pi = Number(el.dataset.page);
   const r = el.getBoundingClientRect();
-  const x = (e.clientX - r.left) / scale.value;
-  const y = (e.clientY - r.top) / scale.value;
+  const x = (clientX - r.left) / scale.value;
+  const y = (clientY - r.top) / scale.value;
   const boxes = boxesOf(pi);
   const hit = boxes.find((b) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
   const line = hit ? linesOf(boxes).find((l) => l.includes(hit)) : undefined;
   menu.value = {
-    x: Math.max(4, Math.min(e.clientX, window.innerWidth - 240)),
-    y: Math.max(4, Math.min(e.clientY, window.innerHeight - 270)),
+    x: Math.max(4, Math.min(clientX, window.innerWidth - 240)),
+    y: Math.max(4, Math.min(clientY, window.innerHeight - 270)),
     page: pi,
     value: hit?.text ?? '',
     row: line ? lineText(line) : '',
     sel: String(window.getSelection() ?? '').trim(),
   };
+  return true;
+}
+function onMenu(e: MouseEvent) {
+  // the browser's own menu outside the pages
+  if (openMenu(e.target as Element | null, e.clientX, e.clientY)) e.preventDefault();
 }
 const short = (s: string) => (s.length > 28 ? s.slice(0, 27) + '…' : s);
 /** the note in the toolbar after copying ("Copied", "Image copied …"); empty = hidden */
@@ -284,7 +390,7 @@ async function copyImage(pi: number) {
   } catch {
     try {
       const m = await ex;
-      m.downloadBlob(await png, `${m.safeFileName(state.report.name)}_page${pi + 1}.png`);
+      await save(await png, `${m.safeFileName(state.report.name)}_page${pi + 1}.png`);
       note(L.rpt_image_saved, 3500);
     } catch (e) {
       note('');
@@ -313,27 +419,42 @@ async function copy(text: string) {
 // ---- export / print
 const exportOpen = ref(false);
 const exportRoot = ref<HTMLElement>();
+const moreOpen = ref(false);
+const moreRoot = ref<HTMLElement>();
 const menuEl = ref<HTMLElement>();
-const onDocPointer = (e: MouseEvent) => {
+const onDocPointer = (e: PointerEvent) => {
   if (exportRoot.value && !exportRoot.value.contains(e.target as Node)) exportOpen.value = false;
+  if (moreRoot.value && !moreRoot.value.contains(e.target as Node)) moreOpen.value = false;
   if (menuEl.value && !menuEl.value.contains(e.target as Node)) menu.value = null;
 };
+/** a choice in the phone's "more" menu: the menu closes first */
+function fromMore(run: () => unknown) {
+  moreOpen.value = false;
+  void run();
+}
+/** a file made here: to the host application when it takes the files (a phone app's web view), else downloaded */
+async function save(blob: Blob, name: string, action: FileAction = 'download') {
+  if (await deliverFile(blob, name, action)) return;
+  (await import('../export')).downloadBlob(blob, name);
+}
 async function exportAs(kind: 'pdf' | 'xlsx' | 'docx' | 'csv' | 'html' | 'png') {
   exportOpen.value = false;
+  moreOpen.value = false;
+  await drawing;
   if (!doc.value) return;
   busy.value = true;
   try {
     const ex = await import('../export');
     const base = ex.safeFileName(state.report.name);
     await new Promise((r) => setTimeout(r, 10));
-    if (kind === 'pdf') ex.downloadBlob(await ex.exportPdf(doc.value, state.report.name), base + '.pdf');
-    else if (kind === 'xlsx') ex.downloadBlob(await ex.exportXlsx(doc.value, state.report.name, { margins: state.report.page.margins }), base + '.xlsx');
-    else if (kind === 'docx') ex.downloadBlob(await ex.exportDocx(doc.value, state.report.name), base + '.docx');
-    else if (kind === 'csv') ex.downloadBlob(ex.exportCsv(doc.value), base + '.csv');
-    else if (kind === 'html') ex.downloadBlob(new Blob([ex.exportHtml(doc.value, state.report.name)], { type: 'text/html' }), base + '.html');
+    if (kind === 'pdf') await save(await ex.exportPdf(doc.value, state.report.name), base + '.pdf');
+    else if (kind === 'xlsx') await save(await ex.exportXlsx(doc.value, state.report.name, { margins: state.report.page.margins }), base + '.xlsx');
+    else if (kind === 'docx') await save(await ex.exportDocx(doc.value, state.report.name), base + '.docx');
+    else if (kind === 'csv') await save(ex.exportCsv(doc.value), base + '.csv');
+    else if (kind === 'html') await save(new Blob([ex.exportHtml(doc.value, state.report.name)], { type: 'text/html' }), base + '.html');
     else {
       const r = await ex.exportPng(doc.value, base);
-      ex.downloadBlob(r.blob, r.name);
+      await save(r.blob, r.name);
     }
   } catch (e) {
     error.value = viewerError(e);
@@ -346,9 +467,21 @@ function viewerError(e: unknown) {
   return isStaleVersionError(e) ? 'The Report Viewer was updated on the server while this page was open. Reload the page (F5) to export, print or copy.' : (e as Error).message;
 }
 async function print() {
+  moreOpen.value = false;
+  await drawing;
   if (!doc.value) return;
   try {
-    (await import('../export')).printDoc(doc.value, state.report.name);
+    const ex = await import('../export');
+    // a web view of a phone app cannot print: the host gets the report as a PDF and prints it itself
+    if (viewerHost.active && viewerHost.files === 'host') {
+      busy.value = true;
+      try {
+        if (await deliverFile(await ex.exportPdf(doc.value, state.report.name), ex.safeFileName(state.report.name) + '.pdf', 'print')) return;
+      } finally {
+        busy.value = false;
+      }
+    }
+    ex.printDoc(doc.value, state.report.name);
   } catch (e) {
     error.value = viewerError(e);
   }
@@ -374,28 +507,85 @@ function onKey(e: KeyboardEvent) {
 }
 
 let ro: ResizeObserver | null = null;
+/** the size of the view: narrow = compact toolbar, and on a phone the pages start fitted to the width */
+function onResize() {
+  viewH.value = body.value?.clientHeight ?? 600;
+  const w = root.value?.clientWidth ?? 0;
+  if (w > 0) {
+    compact.value = w < COMPACT_BELOW;
+    if (compact.value && !userZoomed) fit.value = true;
+    if (!compact.value) moreOpen.value = false;
+  }
+  applyFit();
+}
 defineExpose({ generate, print, exportAs });
 onMounted(() => {
-  document.addEventListener('mousedown', onDocPointer);
+  document.addEventListener('pointerdown', onDocPointer);
   window.addEventListener('keydown', onKey);
-  if (body.value) {
-    ro = new ResizeObserver(() => (viewH.value = body.value?.clientHeight ?? 600));
-    ro.observe(body.value);
-  }
+  ro = new ResizeObserver(onResize);
+  if (root.value) ro.observe(root.value);
+  if (body.value) ro.observe(body.value);
+  onResize();
   void generate();
 });
 onBeforeUnmount(() => {
-  document.removeEventListener('mousedown', onDocPointer);
+  document.removeEventListener('pointerdown', onDocPointer);
   window.removeEventListener('keydown', onKey);
   ro?.disconnect();
   clearTimeout(copiedTimer);
   clearTimeout(restTimer);
+  clearTimeout(pressTimer);
+  cancelAnimationFrame(pinchRaf);
 });
 </script>
 
 <template>
-  <div class="rv">
-    <div class="rv-bar">
+  <div ref="root" class="rv" :class="{ compact }">
+    <!-- a phone or a narrow frame: pages, find and one "more" menu with everything else -->
+    <div v-if="compact" class="rv-bar compact">
+      <button class="vbtn" :disabled="page === 1" :title="L.rpt_prev_page" @click="goPrev">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 6-6 6 6 6" /></svg>
+      </button>
+      <input class="pagebox tnum" type="text" inputmode="numeric" :value="page" :title="L.rpt_page_number" @change="goTo(Number(($event.target as HTMLInputElement).value))" />
+      <span class="pageof">{{ L.rpt_of }} {{ totalPages }}</span>
+      <button class="vbtn" :disabled="page === totalPages" :title="L.rpt_next_page" @click="goNext">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6" /></svg>
+      </button>
+      <div class="vspacer" />
+      <span v-if="copied" class="rv-copied">{{ copied === L.rpt_copying ? '' : '✓ ' }}{{ copied }}</span>
+      <slot name="actions" />
+      <button class="vbtn" :class="{ on: findOpen }" :title="L.rpt_find" @click="toggleFind">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7" /><path d="m20 20-3-3" /></svg>
+      </button>
+      <div ref="moreRoot" class="exp">
+        <button class="vbtn" :class="{ on: moreOpen }" :title="L.rpt_more" @click="moreOpen = !moreOpen">
+          <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="12" cy="19" r="1.8" /></svg>
+        </button>
+        <div v-if="moreOpen" class="exp-menu more-menu">
+          <button type="button" :disabled="!doc" @click="print">{{ L.rpt_print }}</button>
+          <div class="rv-menu-sep" />
+          <div class="more-head">{{ L.rpt_export }}</div>
+          <button type="button" :disabled="!doc" @click="exportAs('pdf')">{{ L.rpt_export_pdf }}</button>
+          <button type="button" :disabled="!doc" @click="exportAs('xlsx')">{{ L.rpt_export_excel }}</button>
+          <button type="button" :disabled="!doc" @click="exportAs('docx')">{{ L.rpt_export_word }}</button>
+          <button type="button" :disabled="!doc" @click="exportAs('png')">{{ L.rpt_export_png }}</button>
+          <button type="button" :disabled="!doc" @click="exportAs('csv')">{{ L.rpt_export_csv }}</button>
+          <button type="button" :disabled="!doc" @click="exportAs('html')">{{ L.rpt_export_html }}</button>
+          <div class="rv-menu-sep" />
+          <div class="more-zoom">
+            <button type="button" :title="L.rpt_zoom_out" @click="zoomBy(-10)">−</button>
+            <span class="tnum">{{ zoom }}%</span>
+            <button type="button" :title="L.rpt_zoom_in" @click="zoomBy(10)">+</button>
+          </div>
+          <button type="button" :class="{ on: fit }" @click="fromMore(toggleFit)">{{ fit ? L.rpt_actual_size : L.rpt_fit_width }}</button>
+          <button type="button" @click="fromMore(() => setLayout(isScroll ? 'page' : 'scroll'))">{{ isScroll ? L.rpt_layout_page : L.rpt_layout_scroll }}</button>
+          <button type="button" @click="fromMore(refresh)">{{ L.rpt_refresh }}</button>
+          <div v-if="recordCount >= 0" class="more-foot">{{ recordsText }}</div>
+        </div>
+      </div>
+    </div>
+
+    <div v-else class="rv-bar">
       <button class="vbtn" :disabled="page === 1" :title="L.rpt_first_page" @click="goFirst">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 17 13 12l5-5M7 6v12" /></svg>
       </button>
@@ -414,7 +604,11 @@ onBeforeUnmount(() => {
       <div class="vsep" />
 
       <input class="zoombox tnum" type="text" :value="zoom" :title="L.rpt_zoom_pct" @change="setZoom(($event.target as HTMLInputElement).value)" />
-      <input v-model.number="zoom" class="zoomslider" type="range" min="50" max="200" step="5" :title="L.rpt_zoom" />
+      <input class="zoomslider" type="range" :min="ZMIN" :max="ZMAX" step="5" :value="zoom" :title="L.rpt_zoom" @input="setZoom(($event.target as HTMLInputElement).value)" />
+      <button class="vbtn" :class="{ on: fit }" :title="fit ? L.rpt_actual_size : L.rpt_fit_width" @click="toggleFit">
+        <!-- arrows to both sides: the page as wide as the view -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4" /></svg>
+      </button>
       <button class="vbtn layout" :class="{ on: isScroll }" :title="isScroll ? L.rpt_layout_scroll : L.rpt_layout_page" @click="setLayout(isScroll ? 'page' : 'scroll')">
         <!-- pages one after another / one page -->
         <svg v-if="isScroll" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -457,7 +651,7 @@ onBeforeUnmount(() => {
       <span v-if="recordCount >= 0" class="vcount">{{ recordsText }}</span>
     </div>
 
-    <div v-if="findOpen" class="find-bar">
+    <div v-if="findOpen" class="find-bar" :class="{ compact }">
       <input ref="findInput" v-model="find" :placeholder="L.rpt_find_placeholder" @keydown.enter="$event.shiftKey ? prevHit() : nextHit()" @keydown.esc="toggleFind" />
       <span class="find-count">{{ findCountText }}</span>
       <button class="vbtn" :disabled="!hits.length" :title="L.rpt_prev_match" @click="prevHit">‹</button>
@@ -471,7 +665,18 @@ onBeforeUnmount(() => {
     </template>
     <div v-for="w in doc?.warnings ?? []" :key="w" class="rv-msg">{{ w }}</div>
 
-    <div ref="body" class="rv-body" :class="{ scroll: isScroll }" @scroll="onScroll" @wheel.passive="onWheel" @contextmenu="onMenu">
+    <div
+      ref="body"
+      class="rv-body"
+      :class="{ scroll: isScroll, compact }"
+      @scroll="onScroll"
+      @wheel.passive="onWheel"
+      @contextmenu="onMenu"
+      @touchstart.passive="onTouchStart"
+      @touchmove="onTouchMove"
+      @touchend.passive="onTouchEnd"
+      @touchcancel.passive="onTouchEnd"
+    >
       <!-- a document preview: the sheet stays light in dark mode, as it prints -->
       <template v-if="doc && isScroll">
         <div v-for="(p, i) in doc.pages" :key="i" class="rv-sheet" :data-page="i" :style="sizeOf(i)">
@@ -724,6 +929,99 @@ onBeforeUnmount(() => {
   padding: 20px;
   background: var(--surface-2);
   overflow: auto;
+  /* fingers scroll the pages; two fingers zoom them (onTouchMove), not the whole viewer */
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+.rv-body.compact {
+  padding: 8px;
+}
+
+/* ---- phone / narrow frame */
+.rv-bar.compact {
+  flex-wrap: nowrap;
+  gap: 2px;
+  padding: 6px 8px;
+}
+.rv-bar.compact .vbtn {
+  min-width: 36px;
+  height: 36px;
+}
+.rv-bar.compact .pagebox {
+  width: 42px;
+  height: 32px;
+}
+.more-menu {
+  left: auto;
+  right: 0;
+  min-width: 220px;
+  max-height: calc(100vh - 70px);
+  overflow-y: auto;
+}
+.more-menu button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.more-menu button.on {
+  color: var(--teal-deep);
+  font-weight: 600;
+}
+.more-head {
+  padding: 6px 10px 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.more-foot {
+  padding: 6px 10px 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.more-zoom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+}
+.more-menu .more-zoom button {
+  flex: none;
+  justify-content: center;
+  width: 42px;
+  padding: 4px 0;
+  border: 1px solid var(--border);
+  font-size: 18px;
+  line-height: 1;
+}
+.more-zoom span {
+  flex: 1;
+  text-align: center;
+  font-size: 13px;
+}
+.find-bar.compact {
+  padding: 6px 8px;
+}
+.find-bar.compact input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+}
+.find-bar.compact .find-count {
+  min-width: 0;
+  white-space: nowrap;
+}
+/* fingers need bigger targets than a mouse */
+@media (pointer: coarse) {
+  .exp-menu button,
+  .rv-menu button {
+    padding: 11px 12px;
+  }
+  .vbtn {
+    min-width: 34px;
+    height: 34px;
+  }
 }
 .rv-sheet {
   margin: 0 auto;

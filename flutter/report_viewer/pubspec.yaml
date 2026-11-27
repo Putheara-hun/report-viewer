@@ -1,0 +1,20 @@
+name: report_viewer
+description: Show ReportTool reports (the Report Viewer) in a Flutter app - Android, iOS and web - with print and share.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  # Android / iOS: the viewer in a web view
+  webview_flutter: ^4.10.0
+  # Flutter web: the viewer in an iframe
+  web: ^1.1.0
+  # what the app does with Print and Export on a phone (a web view cannot print or download)
+  printing: ^5.13.4
+  share_plus: ^10.1.4

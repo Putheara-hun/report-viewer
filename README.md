@@ -7,6 +7,19 @@ record count — no parameters panel and nothing to edit. Khmer text and Google 
 
 It runs completely in the browser, so it is hosted as a static website (see `render.yaml`).
 
+It works on a computer and on a phone, in a web application and in a mobile app. In a narrow frame (under 640 px)
+the toolbar is short (pages, find, and a **⋮** menu with print, export, zoom, layout and refresh), the pages start
+fitted to the width, two fingers zoom the pages and a long press opens the copy menu. The ↔ button (or **⋮ > Fit to
+width**) fits the pages to the width on any screen.
+
+**Code to copy** for your own system:
+
+| | |
+| --- | --- |
+| Vue 3 | [`examples/vue/ReportViewer.vue`](examples/vue/ReportViewer.vue) (the viewer as a component) and [`examples/vue/PayslipReport.vue`](examples/vue/PayslipReport.vue) (a report screen: filter, your API, the viewer) |
+| Flutter (Android, iOS, web) | [`flutter/report_viewer`](flutter/report_viewer) (a package: `ReportViewer` widget, `ReportViewerPage`, `ReportApi`) and its [`example/lib/main.dart`](flutter/report_viewer/example/lib/main.dart) |
+| Any web page | the `viewer.js` example below |
+
 ## How an application uses it
 
 1. The application's screen asks for the criteria (dates, branch …) as it does today.
@@ -38,8 +51,17 @@ async function show(criteria) {
 | `viewer.setData(name, rows)` | new rows for one data source, re-rendered |
 | `viewer.setParams({ TITLE: '…' })` | new parameter values, re-rendered |
 | `viewer.setTheme('dark')` · `viewer.setLabels({...})` | colours · words |
-| `viewer.refresh()` · `viewer.print()` · `viewer.exportAs('pdf')` | re-render · print · download (`pdf`, `xlsx`, `docx`, `csv`, `html`, `png`) |
+| `viewer.refresh()` · `viewer.print()` · `viewer.exportAs('pdf')` | re-render · print · download (`pdf`, `xlsx`, `docx`, `csv`, `html`, `png`); they wait until the report is drawn |
 | `ReportViewer.open({ report, data, params })` | the viewer in a new browser tab (call it from a click) |
+
+- **Files to your app** (`onFile`): a web view inside a phone app (Flutter, Capacitor, Cordova, Android / iOS) can
+  neither download nor print. Give `embed` an `onFile` and every export, and Print (as a PDF), comes to your page
+  instead: `file = { name, mime, size, action: 'download' | 'print', base64, blob(), download() }` — share it, save
+  it or print it the app's way. Without `onFile` the browser downloads and prints as before.
+
+  ```js
+  ReportViewer.embed(box, { onFile: (file) => MyApp.postMessage(JSON.stringify(file)) });
+  ```
 
 - **Rows:** `data` is keyed by the data source **name** in the design (name it e.g. `DataSet1` in the designer).
   Those rows replace the data source; without them the data saved in the text is used. A data source that reads from
@@ -50,11 +72,12 @@ async function show(criteria) {
   `rpt_export_pdf`, `rpt_export_html`, `rpt_export_csv`, `rpt_export_png`, `rpt_print`, `rpt_find`,
   `rpt_find_placeholder`, `rpt_hit_of` (`{a} of {b}`), `rpt_no_matches`, `rpt_prev_match`, `rpt_next_match`,
   `rpt_close`, `rpt_refresh`, `rpt_record`, `rpt_records`, `rpt_no_data`, `rpt_loading`, `rpt_waiting`,
-  `rpt_data_source`, `rpt_layout_scroll`, `rpt_layout_page`, and the right-click menu: `rpt_copy_image`,
+  `rpt_data_source`, `rpt_layout_scroll`, `rpt_layout_page`, the phone's menu and zoom: `rpt_more`, `rpt_fit_width`,
+  `rpt_actual_size`, `rpt_zoom_in`, `rpt_zoom_out`, and the right-click menu: `rpt_copy_image`,
   `rpt_page_n` (`page {n}`), `rpt_copy`, `rpt_copy_value`, `rpt_copy_row`, `rpt_copy_page` (`Copy page {n}`),
   `rpt_copy_all`, `rpt_copied`, `rpt_copying`, `rpt_copied_image`, `rpt_image_saved`.
-- **Right-click** on a page: **Copy as image** (the page as a picture — paste it into a chat, Word or an email with
-  Ctrl+V), copy a value, a row, a page or all pages as text. `viewer.js` gives the iframe `allow="clipboard-write"`;
+- **Right-click** (on a phone: a long press) on a page: **Copy as image** (the page as a picture — paste it into a
+  chat, Word or an email with Ctrl+V), copy a value, a row, a page or all pages as text. `viewer.js` gives the iframe `allow="clipboard-write"`;
   if you write the `<iframe>` yourself, add it too (without it the picture is downloaded instead).
 - **Excel / Word** exports look like the preview: fonts (Khmer too), colours, fills, borders, alignment, column widths
   and row heights. In Excel, numbers and dates stay numbers and dates with the report's format, and the pages follow
