@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, toRaw, watch } from 'vue';
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, toRaw, watch } from 'vue';
 import type { RenderedDoc } from '../engine/doc';
 import { paramValues, renderReport } from '../engine/renderer';
 import { ensureReportFonts } from '../engine/fonts';
@@ -79,47 +79,105 @@ const goLast = () => goTo(totalPages.value);
 watch(totalPages, () => {
   if (page.value > totalPages.value) page.value = totalPages.value;
 });
-// switching the layout or the zoom keeps the page the user is on; a pinch keeps the point between the fingers
+/* A zoom that keeps a point of the page where it is on the screen (the point between the fingers, under the mouse,
+   the one tapped twice): anchor = that point in the content at the old zoom (x, y: scroll + view point) and where it
+   must be in the view (fx, fy). Any other zoom or layout change keeps the page the user is on. */
+let anchor: { x: number; y: number; fx: number; fy: number } | null = null;
 watch([isScroll, scale], ([s, sc], [s0, sc0]) => {
   const el = body.value;
-  const f = pinchFocus;
-  if (el && f && s === s0 && sc0) {
-    const x = el.scrollLeft + f.x;
-    const y = el.scrollTop + f.y;
+  const a = anchor;
+  anchor = null;
+  if (el && a && s === s0 && sc0) {
+    const k = sc / sc0;
+    const p = pad.value;
     void nextTick(() => {
-      el.scrollLeft = Math.max(0, (x * sc) / sc0 - f.x);
-      el.scrollTop = Math.max(0, (y * sc) / sc0 - f.y);
+      el.scrollLeft = Math.max(0, (a.x - p) * k + p - a.fx);
+      el.scrollTop = Math.max(0, (a.y - p) * k + p - a.fy);
       updateRest();
     });
     return;
   }
   goTo(page.value);
 });
+/** zoom to z keeping the content point at (fx0, fy0) of the view where it is, or moving it to (fx, fy) */
+function zoomAt(z: number, fx0: number, fy0: number, fx = fx0, fy = fy0) {
+  const el = body.value;
+  const target = Math.min(ZMAX, Math.max(ZMIN, Math.round(z)));
+  if (!el) return setZoom(target);
+  const a = { x: el.scrollLeft + fx0, y: el.scrollTop + fy0, fx, fy };
+  if (target === zoom.value) {
+    // the same zoom: only the move
+    el.scrollLeft = Math.max(0, a.x - fx);
+    el.scrollTop = Math.max(0, a.y - fy);
+    return;
+  }
+  anchor = a;
+  setZoom(target);
+}
+const viewPoint = (clientX: number, clientY: number) => {
+  const r = body.value?.getBoundingClientRect();
+  return r ? { x: clientX - r.left, y: clientY - r.top } : { x: 0, y: 0 };
+};
 
-// ---- touch: two fingers zoom the pages (not the whole viewer), a long press opens the copy menu
-let pinch: { d: number; z: number } | null = null;
-let pinchFocus: { x: number; y: number } | null = null;
-let pinchZoom = 0;
-let pinchRaf = 0;
-let press: { x: number; y: number; target: Element | null } | null = null;
+/* ---- live zoom: while two fingers pinch (or a touchpad pinches / Ctrl + wheel turns) the pages are only scaled on
+   screen - smooth, nothing is drawn again; when the hand stops the zoom is applied and the pages are drawn sharp */
+const live = reactive({ s: 1, tx: 0, ty: 0, ox: 0, oy: 0 });
+let liveStart: { z: number; fx: number; fy: number } | null = null;
+const pagesStyle = computed(() =>
+  live.s === 1 && !live.tx && !live.ty
+    ? undefined
+    : { transform: `translate(${live.tx}px, ${live.ty}px) scale(${live.s})`, transformOrigin: `${live.ox}px ${live.oy}px`, willChange: 'transform' },
+);
+function liveBegin(fx: number, fy: number) {
+  const el = body.value;
+  if (!el) return;
+  stopGlide();
+  liveStart = { z: zoom.value, fx, fy };
+  // the scaling turns round the point under the fingers / the mouse (pages' own coordinates)
+  live.ox = el.scrollLeft + fx - pad.value;
+  live.oy = el.scrollTop + fy - pad.value;
+  live.s = 1;
+  live.tx = live.ty = 0;
+}
+function liveUpdate(s: number, fx: number, fy: number) {
+  const st = liveStart;
+  if (!st) return;
+  live.s = Math.min(ZMAX / st.z, Math.max(ZMIN / st.z, s));
+  live.tx = fx - st.fx;
+  live.ty = fy - st.fy;
+}
+function liveEnd() {
+  const st = liveStart;
+  liveStart = null;
+  if (!st) return;
+  const z = st.z * live.s;
+  const fx = st.fx + live.tx;
+  const fy = st.fy + live.ty;
+  live.s = 1;
+  live.tx = live.ty = 0;
+  zoomAt(z, st.fx, st.fy, fx, fy);
+}
+
+// ---- touch: two fingers zoom (live), a double tap zooms in / back, a long press opens the copy menu
+let pinchD = 0;
+let press: { x: number; y: number; t: number; target: Element | null } | null = null;
 let pressTimer = 0;
 const fingers = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
-function focusOf(t: TouchList) {
-  const r = body.value?.getBoundingClientRect();
-  return r ? { x: (t[0].clientX + t[1].clientX) / 2 - r.left, y: (t[0].clientY + t[1].clientY) / 2 - r.top } : null;
-}
+const midpoint = (t: TouchList) => viewPoint((t[0].clientX + t[1].clientX) / 2, (t[0].clientY + t[1].clientY) / 2);
 function cancelPress() {
   clearTimeout(pressTimer);
   press = null;
 }
 function onTouchStart(e: TouchEvent) {
+  stopGlide();
   if (e.touches.length === 2) {
     cancelPress();
-    pinch = { d: fingers(e.touches) || 1, z: zoom.value };
-    pinchFocus = focusOf(e.touches);
+    pinchD = fingers(e.touches) || 1;
+    const m = midpoint(e.touches);
+    liveBegin(m.x, m.y);
   } else if (e.touches.length === 1) {
     const t = e.touches[0];
-    press = { x: t.clientX, y: t.clientY, target: e.target as Element | null };
+    press = { x: t.clientX, y: t.clientY, t: Date.now(), target: e.target as Element | null };
     clearTimeout(pressTimer);
     pressTimer = window.setTimeout(() => {
       if (press) openMenu(press.target, press.x, press.y);
@@ -128,26 +186,111 @@ function onTouchStart(e: TouchEvent) {
   }
 }
 function onTouchMove(e: TouchEvent) {
-  if (pinch && e.touches.length === 2) {
+  if (liveStart && e.touches.length === 2) {
     e.preventDefault();
-    pinchFocus = focusOf(e.touches);
-    pinchZoom = (pinch.z * fingers(e.touches)) / pinch.d;
-    if (!pinchRaf)
-      pinchRaf = requestAnimationFrame(() => {
-        pinchRaf = 0;
-        if (pinch) setZoom(Math.round(pinchZoom / 5) * 5);
-      });
+    const m = midpoint(e.touches);
+    liveUpdate(fingers(e.touches) / pinchD, m.x, m.y);
   } else if (press) {
     const t = e.touches[0];
     if (!t || Math.hypot(t.clientX - press.x, t.clientY - press.y) > 10) cancelPress();
   }
 }
 function onTouchEnd(e: TouchEvent) {
-  if (e.touches.length < 2) {
-    pinch = null;
-    pinchFocus = null;
-  }
+  if (e.touches.length < 2 && liveStart) liveEnd();
+  // a short touch that did not move: a tap (two quick taps zoom)
+  if (press && Date.now() - press.t < 300) tapped(press.x, press.y);
   cancelPress();
+}
+
+/* ---- two quick taps / a double click: zoom in there; again: back to the page width (a phone) or 100% */
+let lastTap: { x: number; y: number; t: number } | null = null;
+function tapped(clientX: number, clientY: number) {
+  const now = Date.now();
+  const prev = lastTap;
+  if (prev && now - prev.t < 320 && Math.hypot(clientX - prev.x, clientY - prev.y) < 30) {
+    lastTap = null;
+    const f = viewPoint(clientX, clientY);
+    const zoomedIn = fit.value ? false : zoom.value >= (compact.value ? 90 : 150);
+    if (!zoomedIn) zoomAt(Math.min(ZMAX, Math.max(zoom.value * 2, 100)), f.x, f.y);
+    else if (compact.value) {
+      fit.value = true;
+      applyFit();
+    } else setZoom(100);
+    return;
+  }
+  lastTap = { x: clientX, y: clientY, t: now };
+}
+
+/* ---- the hand: with the mouse, press on the pages and drag them (faster than the scroll bars); let go while moving
+   and they glide on and slow down. (Fingers scroll by themselves.) Copying stays on the right-click menu. */
+const dragging = ref(false);
+let drag: { x: number; y: number; left: number; top: number; moved: boolean; vx: number; vy: number; lx: number; ly: number; lt: number } | null = null;
+let glideRaf = 0;
+function stopGlide() {
+  cancelAnimationFrame(glideRaf);
+  glideRaf = 0;
+}
+function onPointerDown(e: PointerEvent) {
+  if (e.pointerType !== 'mouse' || e.button !== 0) return;
+  const el = body.value;
+  if (!el || (e.target as Element | null)?.closest?.('input, textarea, select, button, a')) return;
+  stopGlide();
+  e.preventDefault(); // the page moves, no text is selected
+  window.focus(); // the arrow keys still turn the pages
+  drag = { x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop, moved: false, vx: 0, vy: 0, lx: e.clientX, ly: e.clientY, lt: performance.now() };
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', onPointerUp);
+  window.addEventListener('pointercancel', onPointerUp);
+}
+function onPointerMove(e: PointerEvent) {
+  const d = drag;
+  const el = body.value;
+  if (!d || !el) return;
+  const dx = e.clientX - d.x;
+  const dy = e.clientY - d.y;
+  if (!d.moved && Math.hypot(dx, dy) < 3) return;
+  d.moved = true;
+  dragging.value = true;
+  el.scrollLeft = d.left - dx;
+  el.scrollTop = d.top - dy;
+  // the speed of the last moves (px per ms), for the glide
+  const now = performance.now();
+  const dt = Math.max(1, now - d.lt);
+  d.vx = 0.7 * ((d.lx - e.clientX) / dt) + 0.3 * d.vx;
+  d.vy = 0.7 * ((d.ly - e.clientY) / dt) + 0.3 * d.vy;
+  d.lx = e.clientX;
+  d.ly = e.clientY;
+  d.lt = now;
+}
+function onPointerUp(e: PointerEvent) {
+  window.removeEventListener('pointermove', onPointerMove);
+  window.removeEventListener('pointerup', onPointerUp);
+  window.removeEventListener('pointercancel', onPointerUp);
+  const d = drag;
+  drag = null;
+  dragging.value = false;
+  if (!d) return;
+  if (!d.moved) {
+    if (e.type === 'pointerup') tapped(e.clientX, e.clientY); // a click (two quick ones zoom)
+    return;
+  }
+  if (performance.now() - d.lt > 80) return; // the mouse had stopped before it was let go
+  let vx = d.vx;
+  let vy = d.vy;
+  let last = performance.now();
+  const step = (now: number) => {
+    const el = body.value;
+    if (!el) return;
+    const dt = Math.min(40, now - last);
+    last = now;
+    el.scrollLeft += vx * dt;
+    el.scrollTop += vy * dt;
+    const k = Math.pow(0.994, dt);
+    vx *= k;
+    vy *= k;
+    glideRaf = Math.hypot(vx, vy) > 0.02 ? requestAnimationFrame(step) : 0;
+  };
+  glideRaf = requestAnimationFrame(step);
 }
 
 let restAtBottom = false;
@@ -181,10 +324,26 @@ function onScroll() {
 }
 /** one page at a time: scrolling on past the end of a page opens the next one (past the top: the previous one) */
 let lastFlip = 0;
+let wheelTimer = 0;
 function onWheel(e: WheelEvent) {
   menu.value = null;
+  stopGlide();
   const el = body.value;
-  if (isScroll.value || !el || e.ctrlKey) return;
+  if (!el) return;
+  // a touchpad pinch (the browser sends it as Ctrl + wheel) or Ctrl + the mouse wheel: zoom round the mouse - live,
+  // applied when the wheel stops
+  if (e.ctrlKey) {
+    e.preventDefault();
+    const f = viewPoint(e.clientX, e.clientY);
+    if (!liveStart) liveBegin(f.x, f.y);
+    const dy = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+    const k = Math.abs(dy) >= 40 ? (dy < 0 ? 1.12 : 1 / 1.12) : Math.exp(-dy * 0.01);
+    liveUpdate(live.s * k, f.x, f.y);
+    clearTimeout(wheelTimer);
+    wheelTimer = window.setTimeout(liveEnd, 180);
+    return;
+  }
+  if (isScroll.value) return;
   const now = Date.now();
   if (now - lastFlip < 450) return;
   if (e.deltaY > 0 && restAtBottom && page.value < totalPages.value) {
@@ -535,7 +694,11 @@ onBeforeUnmount(() => {
   clearTimeout(copiedTimer);
   clearTimeout(restTimer);
   clearTimeout(pressTimer);
-  cancelAnimationFrame(pinchRaf);
+  clearTimeout(wheelTimer);
+  stopGlide();
+  window.removeEventListener('pointermove', onPointerMove);
+  window.removeEventListener('pointerup', onPointerUp);
+  window.removeEventListener('pointercancel', onPointerUp);
 });
 </script>
 
@@ -668,23 +831,27 @@ onBeforeUnmount(() => {
     <div
       ref="body"
       class="rv-body"
-      :class="{ scroll: isScroll, compact }"
+      :class="{ scroll: isScroll, compact, dragging }"
       @scroll="onScroll"
-      @wheel.passive="onWheel"
+      @wheel="onWheel"
       @contextmenu="onMenu"
+      @pointerdown="onPointerDown"
       @touchstart.passive="onTouchStart"
       @touchmove="onTouchMove"
       @touchend.passive="onTouchEnd"
       @touchcancel.passive="onTouchEnd"
     >
-      <!-- a document preview: the sheet stays light in dark mode, as it prints -->
-      <template v-if="doc && isScroll">
-        <div v-for="(p, i) in doc.pages" :key="i" class="rv-sheet" :data-page="i" :style="sizeOf(i)">
-          <div v-if="near(i)" class="rv-svg" v-html="svgOf(i)" />
+      <!-- a document preview: the sheet stays light in dark mode, as it prints; rv-pages is scaled on screen while a
+           hand zooms (live), then the pages are drawn at the new zoom -->
+      <div v-if="doc && doc.pages.length" class="rv-pages" :style="pagesStyle">
+        <template v-if="isScroll">
+          <div v-for="(p, i) in doc.pages" :key="i" class="rv-sheet" :data-page="i" :style="sizeOf(i)">
+            <div v-if="near(i)" class="rv-svg" v-html="svgOf(i)" />
+          </div>
+        </template>
+        <div v-else class="rv-sheet" :data-page="page - 1" :style="sizeOf(page - 1)">
+          <div class="rv-svg" v-html="svgOf(page - 1)" />
         </div>
-      </template>
-      <div v-else-if="doc && doc.pages.length" class="rv-sheet" :data-page="page - 1" :style="sizeOf(page - 1)">
-        <div class="rv-svg" v-html="svgOf(page - 1)" />
       </div>
       <div v-else-if="!busy && !error" class="rv-empty">{{ L.rpt_no_data }}</div>
     </div>
@@ -935,6 +1102,19 @@ onBeforeUnmount(() => {
 }
 .rv-body.compact {
   padding: 8px;
+}
+/* the hand: with a mouse the pages are grabbed and dragged (copying is on the right-click menu) */
+@media (pointer: fine) {
+  .rv-body {
+    cursor: grab;
+  }
+  .rv-body .rv-sheet {
+    user-select: none;
+  }
+}
+.rv-body.dragging,
+.rv-body.dragging * {
+  cursor: grabbing;
 }
 
 /* ---- phone / narrow frame */
