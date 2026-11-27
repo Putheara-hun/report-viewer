@@ -10,7 +10,9 @@ It runs completely in the browser, so it is hosted as a static website (see `ren
 It works on a computer and on a phone, in a web application and in a mobile app. In a narrow frame (under 640 px)
 the toolbar is short (pages, find, and a **⋮** menu with print, export, zoom, layout and refresh), the pages start
 fitted to the width, two fingers zoom the pages and a long press opens the copy menu. The ↔ button (or **⋮ > Fit to
-width**) fits the pages to the width on any screen.
+width**) fits the pages to the width on any screen. With a mouse the pages are **grabbed and dragged** (the hand; let go
+while moving and they glide on); a touchpad pinch or **Ctrl + wheel** zooms round the pointer; a **double click / double
+tap** zooms in there and again back. Zooming by hand is live (the pages follow the fingers), then drawn sharp.
 
 **Code to copy** for your own system:
 
